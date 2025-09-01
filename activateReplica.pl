@@ -75,9 +75,9 @@ my $notPromoted = sub_array(\@localIds, \@promotedAccounts);
 if ($notPromoted) {
 	my $toPromoteList = join( ",",@$notPromoted);
 	if ($toPromoteList ne "") {
-		my $execRemove = system("su - zextras -c \"/opt/zextras/bin/carbonio ha setAccountDestination $dstHostname 10 accounts $toPromoteList\"");
+		my $execRemove = system("su - zextras -c \"/opt/zextras/bin/carbonio mailreplica setAccountDestination $dstHostname 10 accounts $toPromoteList\"");
 		print $execRemove;
-		print "su - zextras -c \"/opt/zextras/bin/carbonio ha setAccountDestination $dstHostname 10 accounts $toPromoteList\" \n";
+		print "su - zextras -c \"/opt/zextras/bin/carbonio mailreplica setAccountDestination $dstHostname 10 accounts $toPromoteList\" \n";
 
 	}
 }
