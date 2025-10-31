@@ -8,7 +8,6 @@ use strict;
 use Net::LDAP;
 use Net::LDAP::Control::Paged;
 use Net::LDAP::Constant qw( LDAP_CONTROL_PAGED );
-use JSON;
 use Data::Dumper;
 use Encode;
 use YAML qw/LoadFile/;
@@ -24,23 +23,33 @@ if ($ARGV[0] ne "") {
     exit 1;
 }
 
+my $euid = $>;
+if (getpwuid($euid) ne "zextras") {
+    print "Please run as zextras user\n";
+    exit 1;
+}
+
+my $logFile = "";
 my $config = LoadFile($configFile); 
 
 my $createLog = @{$config}{'create_log'};
+if ($createLog) {
+	#Create a log file
+	my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time);
+	my $mdy = sprintf '%d_%d_%d', $mday, $mon+1,$year+1900;
+	my $hm = $hour."_".$min;
+	$logFile = @{$config}{'log_file_dir'}.$mdy."_".$hm.".log";
+}
+
 
 #Local LDAP
-my $localLdapHost = @{$config}{'local_ldap_server'};
-my $localLdapPort = @{$config}{'local_ldap_port'};
-my $localLdapProto = @{$config}{'local_ldap_proto'};
-my $zcsLdapUri = "$localLdapProto://$localLdapHost:$localLdapPort";
-my $localBind = @{$config}{'local_ldap_user_dn'};
-my $localPassword = @{$config}{'local_ldap_password'};
-my $localSearchBase =  @{$config}{'local_ldap_searchbase'};
-my $localFilter =  @{$config}{'local_ldap_filter'};
-my $localAttr =  @{$config}{'local_ldap_attr'};
-my $localAttributes =  @{$config}{'local_ldap_attrs'};
+my $localBind = getLocalConfig("zimbra_ldap_userdn");
+my $localPassword = getLocalConfig("zimbra_ldap_password");
+my $ldapUri = getLocalConfig("ldap_master_url");
+my $serverHostName = getLocalConfig("zimbra_server_hostname");
 
-#HA
+#Mail Replica
+my $domain_to_replicate = @{$config}{'domain_to_replicate'};
 my $db_host = @{$config}{'pg_server'};
 my $db_port = @{$config}{'pg_port'};
 my $db_user = @{$config}{'pg_user'};
@@ -48,25 +57,34 @@ my $db_name = @{$config}{'pg_db'};
 my $db_pass = @{$config}{'pg_password'}; 
 my $dstHostname = @{$config}{'dst_hostname'}; 
 
+my $localSearchBase =  "";
+my $localFilter =  "";
+if ($domain_to_replicate ne "") {
+	my $ddn = $domain_to_replicate;
+	$ddn =~ s/\./,dc=/g;
+	$localSearchBase =  "ou=people,dc=".$ddn;
+	$localFilter = "&(!(zimbraIsSystemAccount=TRUE))(zimbraAccountStatus=active)(zimbraMailDeliveryAddress=*\@".$domain_to_replicate.")(zimbraMailHost=".$serverHostName .")";
+} else {
+	my $ddn = $domain_to_replicate;
+	$ddn =~ s/\./,dc=/g;
+	$localSearchBase =  "";
+	$localFilter = "&(!(zimbraIsSystemAccount=TRUE))(zimbraAccountStatus=active)(zimbraMailHost=".$serverHostName .")";
+}	
+
+my $localAttr = "zimbraId";
+
 my $encoding = $^O eq 'MSWin32' ? 'cp850' : 'utf8';
 
-#Create a log file
-my ($sec,$min,$hour,$mday,$mon,$year) = localtime(time);
-my $mdy = sprintf '%d_%d_%d', $mday, $mon+1,$year+1900;
-my $hm = $hour."_".$min;
-my $logFile = @{$config}{'log_file_dir'}.$mdy."_".$hm.".txt";
-my $xcgContacts = @{$config}{'exchange_contacts'};
+my $localLdap = Net::LDAP->new($ldapUri, onerror => 'die') or die "Could not connect to ldap directory!";
+$localLdap->bind($localBind, password=>$localPassword);
 
-my $local = Net::LDAP->new($zcsLdapUri, onerror => 'die') or die "Could not connect to ldap directory!";
-$local->bind($localBind, password=>$localPassword);
-
-my @localIds = &ldapGet($local,$localSearchBase, $localFilter, $localAttr);
+my @localIds = &ldapGet($localLdap,$localSearchBase, $localFilter, $localAttr);
 
 my @promotedAccounts = ();
 my $db = "dbi:Pg:dbname=$db_name;host=$db_host;port=$db_port";
 my $dbh = DBI->connect($db, $db_user, $db_pass,{ RaiseError => 1, AutoCommit => 0 }) || die "Error connecting to the database: $DBI::errstr\n";
-my @haData = &execSelect($dbh, "SELECT account_id, status, update_time, mail_host, replica_topic_id FROM replica_account");
-foreach my $r (@haData) {
+my @mailReplicaData = &execSelect($dbh, "SELECT account_id, status, update_time, mail_host, replica_topic_id FROM ha.replica_account");
+foreach my $r (@mailReplicaData) {
 	push(@promotedAccounts, $r->{'account_id'});
 }
 $dbh->disconnect();	
@@ -75,11 +93,24 @@ my $notPromoted = sub_array(\@localIds, \@promotedAccounts);
 if ($notPromoted) {
 	my $toPromoteList = join( ",",@$notPromoted);
 	if ($toPromoteList ne "") {
-		my $execRemove = system("su - zextras -c \"/opt/zextras/bin/carbonio ha setAccountDestination $dstHostname 10 accounts $toPromoteList\"");
-		print $execRemove;
-		print "su - zextras -c \"/opt/zextras/bin/carbonio ha setAccountDestination $dstHostname 10 accounts $toPromoteList\" \n";
-
+		if ($createLog) {
+			&writeLog("setting destination server " + $dstHostname + " for ",$toPromoteList);
+		}		
+		my $activateReplicaCmd = "/opt/zextras/bin/carbonio mailreplica setAccountDestination $dstHostname 10 accounts $toPromoteList";
+		print $activateReplicaCmd."\n";
+		system($activateReplicaCmd);
 	}
+}
+
+######################################## FUNCTIONS ###################################
+sub getLocalConfig {
+	my $key = shift;
+	return $main::loaded{lc}{$key}
+	if (exists $main::loaded{lc}{$key});
+	my $val = `/opt/zextras/bin/zmlocalconfig -x -s -m nokey ${key} 2> /dev/null`;
+	chomp $val;
+	$main::loaded{lc}{$key} = $val;
+	return $val;
 }
 
 ##&ldapGet($ldapObj,$searchbase, $filter,$attribute);
@@ -167,10 +198,10 @@ sub execSelect {
 	if($rv < 0) {
 	   print $DBI::errstr;
 	}
-	my $rowRef = $sth->fetchrow_hashref;
     while (my $row_ref = $sth->fetchrow_hashref())   {
 		push (@arrayRef,$row_ref);
     }
     $sth->finish;
     return @arrayRef;
 }
+

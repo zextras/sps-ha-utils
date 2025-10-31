@@ -1,33 +1,17 @@
 #General
 create_log: 0
+log_file_dir: "/tmp/"
 
-#Local LDAP
-local_ldap_server: "directoryServer"
-local_ldap_port: "389"
-local_ldap_proto: "ldap"
-local_ldap_user_dn: "uid=zimbra,cn=admins,cn=zimbra"
-local_ldap_password: "*********"
-local_ldap_searchbase: "ou=people,dc=demo,dc=zextras,dc=io"
-local_ldap_filter: "&(!(zimbraIsSystemAccount=TRUE))(zimbraAccountStatus=active)(zimbraMailDeliveryAddress=*@demo.zextras.io)(zimbraMailHost=sourceServer)"
-local_ldap_attr: "zimbraId"
-local_ldap_attrs: "sn givenName mail displayName description title l st co company"
-
-#External LDAP
-ldap_server: ""
-ldap_port: 389
-ldap_proto: "ldap"
-ldap_searchbase: ""
-ldap_user: ""
-ldap_password: ""
-ldap_attr: "mail"
-ldap_filter: ""
-exchange_contacts: 0
-
-
-#HA Params
-pg_server: "MailboxServer"
+#Mail Replica Params
+#Domain of accounts to be promoted, if for all account leave it empty
+domain_to_replicate: "example.com"
+#The server where db connectors are runnin
+pg_server: 
 pg_port: 5432
+#Get dollowing values running
+# consul kv get -recurse -token-file="/etc/carbonio/advanced/service-discover/token" "carbonio-ha"
 pg_user: "ha"
 pg_password: '**************'
 pg_db: "ha"
+#The application server where to replicate accounts
 dst_hostname: "replicaServer"
